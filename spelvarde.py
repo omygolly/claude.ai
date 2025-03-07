@@ -342,74 +342,58 @@ def calculate_betting_percentages(horses_df, betting_data, race_number):
     return horses_df
 
 def extract_json_safely(text, horses_data):
-    """
-    Robust JSON-extrahering med flera fallback-metoder
-    """
-    import re
-    import json
+    try:
+        # Rensa text och ta bort kodblock-markörer
+        text = text.strip().replace('```json', '').replace('```', '').strip()
+        
+        # Ta bort extra slutande måsvinge
+        text = text.replace('}]}', ']}')
+        
+        print("DEBUG: Rensat text:", text)
 
-    def safe_parse(text):
-        """
-        Försöker parsa JSON med olika metoder
-        """
-        # Rensa och förbered text
-        text = text.strip()
+        # Försök parsa JSON
+        parsed = json.loads(text)
         
-        # Ta bort eventuell text före/efter JSON
-        text = re.sub(r'^[^{]*', '', text)
-        text = re.sub(r'[^}]*$', '', text)
-        
-        # Kontrollera och justera JSON
-        try:
-            # Försök parsa direkt
-            parsed = json.loads(text)
+        # Validera struktur
+        if (isinstance(parsed, dict) and 
+            'horses' in parsed and 
+            all('name' in h and 'start_number' in h and 'calculated_percentage' in h for h in parsed['horses'])):
             
-            # Validera att vi har rätt struktur
-            if not isinstance(parsed, dict):
-                raise ValueError("Inte ett JSON-objekt")
+            # Normalisera procentvärden
+            total_percentage = sum(h['calculated_percentage'] for h in parsed['horses'])
             
-            # Säkerställ att vi har rätt nycklar
-            if 'horses' not in parsed or 'analysis_summary' not in parsed:
-                raise ValueError("Saknar förväntade nycklar")
+            if abs(total_percentage - 100) > 0.1:
+                for h in parsed['horses']:
+                    h['calculated_percentage'] *= 100 / total_percentage
             
             return parsed
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"JSON-tolkningsfel: {e}")
-            
-            # Fallback: skapa standardsvar
-            return {
-                "horses": [
-                    {"name": horse['name'], "start_number": horse['start_number'], "calculated_percentage": 100/len(horses_data)} 
-                    for horse in horses_data
-                ],
-                "analysis_summary": "Kunde inte genomföra fullständig analys"
-            }
 
-    # Olika metoder att extrahera JSON
-    extraction_methods = [
-        lambda: safe_parse(text),
-        lambda: safe_parse(re.sub(r'```json\n?', '', text).replace('```', '')),
-        lambda: safe_parse(re.sub(r'`', '', text))
-    ]
-    
-    # Testa olika extraktionsmetoder
-    for method in extraction_methods:
-        try:
-            result = method()
-            if result:
-                return result
-        except Exception:
-            continue
-    
-    # Sista utvägen - skapa standardsvar
-    print("VARNING: Kunde inte extrahera JSON")
-    return {
-        "horses": [
-            {"name": horse['name'], "start_number": horse['start_number'], "calculated_percentage": 100/len(horses_data)} 
-            for horse in horses_data
-        ],
-        "analysis_summary": "Kunde inte genomföra fullständig analys"
-    }
+    except json.JSONDecodeError as e:
+        print(f"JSON-tolkningsfel: {e}")
+        
+        # Fallback: skapa standardsvar
+        return {
+            "horses": [
+                {
+                    "name": horse['name'], 
+                    "start_number": horse['start_number'], 
+                    "calculated_percentage": 100/len(horses_data)
+                } 
+                for horse in horses_data
+            ],
+            "analysis_summary": "Kunde inte genomföra fullständig analys"
+        }
+    except Exception as e:
+        print(f"Oväntat fel vid JSON-extrahering: {e}")
+        
+        # Sista fallback
+        return {
+            "horses": [
+                {"name": horse['name'], "start_number": horse['start_number'], "calculated_percentage": 100/len(horses_data)} 
+                for horse in horses_data
+            ],
+            "analysis_summary": "Kunde inte genomföra fullständig analys"
+        }
 
 def analyze_horse_with_ai(horses_df):
     """
@@ -433,50 +417,74 @@ def analyze_horse_with_ai(horses_df):
             horses_data.append(horse_info)
         
         # Skapa prompt för AI
-        prompt = f"""Analysera följande hästdata och fördela 100% mellan hästarna:
+        prompt = f"""Analysera och fördela EXAKT 100% mellan {len(horses_data)} hästar.
 
-Hästdata:
-{json.dumps(horses_data, indent=2)}
+KRITISKA KRAV:
+- Fullständig, giltig JSON
+- Exakt {len(horses_data)} hästar
+- Varje häst MÅSTE ha:
+  * Namn
+  * Startnummer
+  * Procentsats
+- Procentsatser MÅSTE summera till 100% exakt
+- INGEN ofullständig data
+- INGEN extra text utanför JSON
 
-INSTRUKTIONER:
-1. Returnera EXAKT detta JSON-format:
+STRIKT FORMAT:
 {{
     "horses": [
         {{
             "name": "Hästnamn",
             "start_number": nummer,
-            "calculated_percentage": procent (0-100, summa 100)
+            "calculated_percentage": procent (0-100)
         }}
     ],
-    "analysis_summary": "Förklaring"
+    "analysis_summary": "Mycket kort analys"
 }}
 
-2. Viktning baserad på:
-   - Formvärde
-   - Karriärresultat
-   - Distansprestanda
-   - Spårplacering
-   - Aktuell spelad procent
-
-3. Summan MÅSTE bli exakt 100
-4. Använd decimaler för precision"""
+Hästdata:
+{json.dumps(horses_data, indent=2)}"""
         
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-3.5-turbo", 
             messages=[
-                {"role": "system", "content": "Du är en expert på travanalys som gör nyanserade kvantitativa bedömningar."},
+                {"role": "system", "content": "Du MÅSTE returnera perfekt JSON för travhästanalys"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=300,
-            response_format={"type": "json_object"}
+            max_tokens=800
         )
         
-        # Hämta och skriv ut det fullständiga svaret
+        # Hämta det fullständiga svaret
         full_response = response.choices[0].message.content.strip()
-        print("\n===== FULLSTÄNDIGT AI-SVAR =====")
-        print(full_response)
-        print("===== SLUT PÅ AI-SVAR =====\n")
+        
+        # Skapa debug-katalog om den inte finns
+        debug_dir = os.path.expanduser('~/Desktop/travanalys_debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # Skapa filnamn med tidsstämpel
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_file = os.path.join(debug_dir, f'ai_debug_{timestamp}.txt')
+        
+        # Skriv all debug-information till samma fil
+        try:
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                # Skriv hästdata
+                f.write("HÄSTDATA:\n")
+                f.write(json.dumps(horses_data, indent=2) + "\n\n")
+                
+                # Skriv prompt
+                f.write("PROMPT:\n")
+                f.write(prompt + "\n\n")
+                
+                # Skriv fullständigt AI-svar
+                f.write("FULLSTÄNDIGT AI-SVAR:\n")
+                f.write(full_response + "\n\n")
+            
+            print(f"Debug-information sparad i: {debug_file}")
+        
+        except Exception as e:
+            print(f"Kunde inte spara debug-fil: {e}")
         
         # Använd robust JSON-extrahering
         parsed_response = extract_json_safely(full_response, horses_data)
@@ -498,126 +506,6 @@ INSTRUKTIONER:
             ],
             "analysis_summary": "Kunde inte genomföra fullständig analys"
         }
-
-def extract_json_safely(text, horses_data):
-    """
-    Robust JSON-extrahering med flera fallback-metoder
-    """
-    import re
-    import json
-
-    def safe_parse(text):
-        """
-        Försöker parsa JSON med olika metoder
-        """
-        # Rensa och förbered text
-        text = text.strip()
-        
-        # Ta bort kodblock-markörer
-        text = text.replace('```json', '').replace('```', '').strip()
-        
-        # Mer robust regex för att extrahera hästdata
-        horses_match = re.findall(
-            r'\{\s*"name":\s*"([^"]+)"\s*,\s*"start_number":\s*(\d+)\s*,\s*"calculated_percentage":\s*(\d+(?:\.\d+)?)\s*\}', 
-            text, 
-            re.DOTALL
-        )
-        
-        # Om vi hittade data manuellt, skapa JSON
-        if horses_match:
-            parsed_horses = [
-                {
-                    "name": horse[0], 
-                    "start_number": int(horse[1]), 
-                    "calculated_percentage": float(horse[2])
-                } 
-                for horse in horses_match
-            ]
-            
-            # Normalisera procentvärden
-            total_percentage = sum(horse['calculated_percentage'] for horse in parsed_horses)
-            
-            if abs(total_percentage - 100) > 0.1:
-                for horse in parsed_horses:
-                    horse['calculated_percentage'] *= 100 / total_percentage
-            
-            return {
-                "horses": parsed_horses,
-                "analysis_summary": "AI-analys baserad på hästdata"
-            }
-        
-        # Fallback till standard JSON-parsing
-        try:
-            # Ta bort ofullständiga rader
-            text = re.sub(r'"calculated_percentage":\s*[0-9.]+$', '', text, flags=re.MULTILINE)
-            text = re.sub(r'\s*}\s*$', '', text, flags=re.MULTILINE)
-            
-            # Ta bort eventuell text före/efter JSON
-            text = re.sub(r'^[^{]*', '', text)
-            text = re.sub(r'[^}]*$', '', text)
-            
-            # Lägg till stängande hakparentes om den saknas
-            if not text.strip().endswith(']}'):
-                text = text.rstrip() + ']}}'
-            
-            print("Rensat text:")
-            print(text)
-            
-            parsed = json.loads(text)
-            
-            # Validera strukturen
-            if not isinstance(parsed, dict):
-                raise ValueError("Inte ett JSON-objekt")
-            
-            # Säkerställ rätt nycklar och normalisera procentvärden
-            if 'horses' in parsed:
-                # Ta bara med poster som har alla nödvändiga nycklar
-                parsed['horses'] = [
-                    horse for horse in parsed['horses'] 
-                    if all(key in horse for key in ['name', 'start_number', 'calculated_percentage'])
-                ]
-                
-                total_percentage = sum(horse.get('calculated_percentage', 0) for horse in parsed['horses'])
-                
-                # Justera procentvärden om de inte summerar till 100
-                if abs(total_percentage - 100) > 0.1:
-                    # Proportionell justering
-                    for horse in parsed['horses']:
-                        horse['calculated_percentage'] = horse.get('calculated_percentage', 0) * (100 / total_percentage)
-                
-                return parsed
-            
-            raise ValueError("Saknar 'horses' nyckel")
-        
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"JSON-tolkningsfel: {e}")
-            
-            # Fallback: skapa standardsvar
-            return {
-                "horses": [
-                    {"name": horse['name'], "start_number": horse['start_number'], "calculated_percentage": 100/len(horses_data)} 
-                    for horse in horses_data
-                ],
-                "analysis_summary": "Kunde inte genomföra fullständig analys"
-            }
-
-    # Testa extraktionsmetoden
-    try:
-        result = safe_parse(text)
-        if result:
-            return result
-    except Exception as e:
-        print(f"Extraktionsmetod misslyckades: {e}")
-    
-    # Sista utvägen - skapa standardsvar
-    print("VARNING: Kunde inte extrahera JSON")
-    return {
-        "horses": [
-            {"name": horse['name'], "start_number": horse['start_number'], "calculated_percentage": 100/len(horses_data)} 
-            for horse in horses_data
-        ],
-        "analysis_summary": "Kunde inte genomföra fullständig analys"
-    }
 
 def compare_ai_ranking_with_betting_percentages(ai_ranking, horses_df):
     """
